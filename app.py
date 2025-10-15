@@ -1,14 +1,15 @@
 # app.py
 """
-Interactive Streamlit app for step-by-step ML workflow:
-- Load built-in or user CSV dataset
-- Inspect data and choose target & features
+Step-by-step ML pipeline (Streamlit)
+- Load built-in Breast Cancer dataset OR upload your CSV
+- Select target & features
 - Train/test split (manual trigger)
-- Scaling (optional)
-- Train models (Logistic Regression, Decision Tree, Random Forest) individually
-- Evaluate models (confusion matrix, classification report, ROC)
-- Compare models and automatically pick best by chosen metric (AUC/F1/Accuracy)
-- Upload a CSV to run predictions with the chosen model
+- Optional scaling (StandardScaler)
+- Train models individually or all at once (Logistic Regression, Decision Tree, Random Forest)
+- Evaluate models: confusion matrix, classification report, ROC curve
+- Compare evaluated models, pick & save best model
+- Upload CSV for batch prediction or provide a single-record input
+- Improved class distribution display (labels, counts, percentages + charts)
 """
 
 import streamlit as st
@@ -16,7 +17,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-from io import StringIO, BytesIO
+from io import StringIO
 from sklearn.datasets import load_breast_cancer
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
@@ -25,7 +26,7 @@ from sklearn.tree import DecisionTreeClassifier
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import (confusion_matrix, classification_report,
                              roc_curve, auc, accuracy_score, f1_score,
-                             roc_auc_score, precision_recall_fscore_support)
+                             roc_auc_score)
 import joblib
 
 sns.set_style("whitegrid")
@@ -48,7 +49,7 @@ def safe_classification_report(y_true, y_pred):
         return {}
 
 def plot_confusion_matrix(y_true, y_pred, labels, ax=None):
-    cm = confusion_matrix(y_true, y_pred)
+    cm = confusion_matrix(y_true, y_pred, labels=labels)
     if ax is None:
         fig, ax = plt.subplots()
     else:
@@ -75,26 +76,25 @@ def plot_roc(y_true, y_prob, ax=None, label=None):
     return fig, roc_auc
 
 def get_default_feature_inputs(X):
-    # return median for each column
     return X.median().to_dict()
 
-def evaluate_model(model, X_test, y_test, scaler=None, model_name="Model"):
+def evaluate_model(model, X_test, y_test, scaler=None):
+    # Prepare X_test
     if scaler is not None:
         X_eval = scaler.transform(X_test)
     else:
         X_eval = X_test.values if isinstance(X_test, pd.DataFrame) else X_test
     y_pred = model.predict(X_eval)
+    # probability / score
     if hasattr(model, "predict_proba"):
         y_prob = model.predict_proba(X_eval)[:, 1]
     else:
-        # fallback: use decision_function or predicted labels
         try:
             y_prob = model.decision_function(X_eval)
-            # if multi-class decision_function returns array; convert to probability-like via min-max
             if y_prob.ndim > 1:
                 y_prob = (y_prob[:, 1] - y_prob.min()) / (y_prob.max() - y_prob.min() + 1e-12)
         except Exception:
-            y_prob = (y_pred).astype(float)
+            y_prob = np.zeros_like(y_pred, dtype=float)
     report = safe_classification_report(y_test, y_pred)
     acc = accuracy_score(y_test, y_pred)
     f1 = f1_score(y_test, y_pred, average='weighted')
@@ -102,10 +102,7 @@ def evaluate_model(model, X_test, y_test, scaler=None, model_name="Model"):
         auc_score = roc_auc_score(y_test, y_prob)
     except Exception:
         auc_score = None
-    return dict(
-        y_pred=y_pred, y_prob=y_prob, report=report,
-        accuracy=acc, f1=f1, auc=auc_score
-    )
+    return dict(y_pred=y_pred, y_prob=y_prob, report=report, accuracy=acc, f1=f1, auc=auc_score)
 
 # ---------------------------
 # Session state initialization
@@ -130,7 +127,7 @@ if "split_done" not in st.session_state:
     st.session_state.split_done = False
 
 # ---------------------------
-# Layout: Left sidebar for controls
+# Sidebar controls
 # ---------------------------
 st.sidebar.title("Controls - Step by Step")
 dataset_choice = st.sidebar.radio("Dataset", ("Use built-in Breast Cancer", "Upload CSV"))
@@ -143,9 +140,9 @@ if dataset_choice == "Use built-in Breast Cancer":
         st.session_state.y = y_builtin.copy()
         st.session_state.split_done = False
         st.session_state.train_done = False
-        st.success("Built-in dataset loaded.")
+        st.sidebar.success("Built-in dataset loaded.")
 else:
-    uploaded_file = st.sidebar.file_uploader("Upload CSV", type=["csv"])
+    uploaded_file = st.sidebar.file_uploader("Upload CSV (for training)", type=["csv"])
     if uploaded_file is not None:
         try:
             df_uploaded = pd.read_csv(uploaded_file)
@@ -157,21 +154,15 @@ else:
             st.sidebar.error(f"Failed to read CSV: {e}")
 
 st.sidebar.markdown("---")
-
-# Options for splitting, scaling, and random seed
 test_size = st.sidebar.slider("Test size", 0.1, 0.5, 0.3, step=0.05)
 random_state = st.sidebar.number_input("Random seed", value=42, step=1)
 use_scaler = st.sidebar.checkbox("Use StandardScaler (recommended for LR)", value=True)
-
 st.sidebar.markdown("---")
-st.sidebar.write("Model selection (pick which to train)")
 train_lr = st.sidebar.checkbox("Logistic Regression", value=True)
 train_dt = st.sidebar.checkbox("Decision Tree", value=True)
 train_rf = st.sidebar.checkbox("Random Forest", value=True)
-
 st.sidebar.markdown("---")
 metric_for_best = st.sidebar.selectbox("Metric to pick best model", ("ROC-AUC", "F1", "Accuracy"))
-
 st.sidebar.markdown("---")
 if st.sidebar.button("Reset session"):
     for k in list(st.session_state.keys()):
@@ -179,19 +170,17 @@ if st.sidebar.button("Reset session"):
     st.experimental_rerun()
 
 # ---------------------------
-# Main area: show data & steps
+# Main content
 # ---------------------------
-st.title("Step-by-step ML pipeline — Breast Cancer (or your CSV)")
+st.title("Step-by-step ML pipeline — Interactive")
 
-# Section: Dataset preview & target selection
-st.header("1) Dataset preview & select target")
+# 1) Dataset preview & selection
+st.header("1) Dataset preview & select target/features")
 if st.session_state.df is not None:
     st.write("Preview (first 5 rows):")
     st.dataframe(st.session_state.df.head())
-    # Target selection
     all_cols = st.session_state.df.columns.tolist()
     target_col = st.selectbox("Select target column (label)", options=all_cols, index=len(all_cols)-1)
-    # Feature selection - default all except target
     features = st.multiselect("Select features (columns to use as X)", options=[c for c in all_cols if c != target_col],
                               default=[c for c in all_cols if c != target_col])
     if st.button("Set dataset for modeling"):
@@ -206,7 +195,7 @@ if st.session_state.df is not None:
 else:
     st.info("No dataset loaded. Use the sidebar to load built-in dataset or upload a CSV.")
 
-# Section: Train-test split
+# 2) Train-test split
 st.header("2) Train / Test split")
 if st.session_state.X is None or st.session_state.y is None:
     st.warning("Please set dataset & target before splitting.")
@@ -214,7 +203,6 @@ else:
     st.write("Dataset shape:", st.session_state.X.shape)
     if st.button("Perform train/test split (stratified if possible)"):
         try:
-            # Determine if y is categorical or continuous - prefer stratify if discrete
             strat = st.session_state.y if st.session_state.y.nunique() <= 20 else None
             X_tr, X_te, y_tr, y_te = train_test_split(
                 st.session_state.X, st.session_state.y,
@@ -230,13 +218,34 @@ else:
         except Exception as e:
             st.error(f"Split failed: {e}")
 
+# Display class distribution (improved)
 if st.session_state.split_done:
-    st.write("Train shape:", st.session_state.X_train.shape, "Test shape:", st.session_state.X_test.shape)
-    if st.checkbox("Show class distribution in train/test"):
-        st.write("Train distribution:", np.bincount(st.session_state.y_train))
-        st.write("Test distribution:", np.bincount(st.session_state.y_test))
+    st.subheader("Class distribution (train & test)")
+    y_train = st.session_state.y_train
+    y_test = st.session_state.y_test
+    # determine labels (sorted unique)
+    labels = sorted(list(pd.Series(y_train).unique()))
+    train_counts = pd.Series(y_train).value_counts().sort_index()
+    test_counts = pd.Series(y_test).value_counts().sort_index()
+    # build dataframe
+    dist_df = pd.DataFrame({
+        "Class": labels,
+        "Train Count": [int(train_counts.get(l, 0)) for l in labels],
+        "Test Count": [int(test_counts.get(l, 0)) for l in labels]
+    })
+    dist_df["Train %"] = (dist_df["Train Count"] / dist_df["Train Count"].sum() * 100).round(2)
+    dist_df["Test %"] = (dist_df["Test Count"] / dist_df["Test Count"].sum() * 100).round(2)
+    st.dataframe(dist_df)
 
-# Section: Scaling
+    # bar charts
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+    sns.barplot(x="Class", y="Train Count", data=dist_df, ax=axes[0])
+    sns.barplot(x="Class", y="Test Count", data=dist_df, ax=axes[1])
+    axes[0].set_title("Train class counts")
+    axes[1].set_title("Test class counts")
+    st.pyplot(fig)
+
+# 3) Scaling
 st.header("3) Scaling (optional)")
 if st.session_state.split_done:
     if use_scaler and st.button("Fit StandardScaler on training set"):
@@ -244,13 +253,13 @@ if st.session_state.split_done:
         st.session_state.scaler = scaler
         st.success("Scaler fitted and stored in session.")
     if st.session_state.scaler is not None:
-        st.write("Scaler mean (first 5):", st.session_state.scaler.mean_[:5])
+        st.write("Scaler mean (first 5):", np.round(st.session_state.scaler.mean_[:5], 4))
         if st.button("Clear scaler"):
             st.session_state.scaler = None
             st.success("Scaler cleared.")
 
-# Section: Train models (manual)
-st.header("4) Train models (click per-model or train all)")
+# 4) Train models (manual)
+st.header("4) Train models (manual or Train All)")
 if not st.session_state.split_done:
     st.warning("Please complete train/test split first.")
 else:
@@ -258,31 +267,22 @@ else:
     with col1:
         if train_lr and st.button("Train Logistic Regression"):
             scaler_local = st.session_state.scaler
-            # Prepare X
-            if scaler_local is not None:
-                Xtr = scaler_local.transform(st.session_state.X_train)
-            else:
-                Xtr = st.session_state.X_train.values
+            Xtr = scaler_local.transform(st.session_state.X_train) if scaler_local is not None else st.session_state.X_train.values
             lr = LogisticRegression(max_iter=1000, random_state=random_state)
             lr.fit(Xtr, st.session_state.y_train)
             st.session_state.models['Logistic Regression'] = (lr, scaler_local)
-            st.session_state.train_done = False
             st.success("Trained Logistic Regression.")
     with col2:
         if train_dt and st.button("Train Decision Tree"):
-            Xtr = st.session_state.X_train.values
             dt = DecisionTreeClassifier(random_state=random_state)
-            dt.fit(Xtr, st.session_state.y_train)
+            dt.fit(st.session_state.X_train.values, st.session_state.y_train)
             st.session_state.models['Decision Tree'] = (dt, None)
-            st.session_state.train_done = False
             st.success("Trained Decision Tree.")
     with col3:
         if train_rf and st.button("Train Random Forest"):
-            Xtr = st.session_state.X_train.values
             rf = RandomForestClassifier(n_estimators=200, random_state=random_state)
-            rf.fit(Xtr, st.session_state.y_train)
+            rf.fit(st.session_state.X_train.values, st.session_state.y_train)
             st.session_state.models['Random Forest'] = (rf, None)
-            st.session_state.train_done = False
             st.success("Trained Random Forest.")
 
     if st.button("Train All Selected Models"):
@@ -304,46 +304,48 @@ else:
             rf.fit(st.session_state.X_train.values, st.session_state.y_train)
             st.session_state.models['Random Forest'] = (rf, None)
             trained.append("Random Forest")
-        st.session_state.train_done = False
         st.success(f"Trained: {', '.join(trained)}")
 
-# Section: Evaluate single model
-st.header("5) Evaluate trained models (click model)")
+# 5) Evaluate single model
+st.header("5) Evaluate trained models (select & evaluate)")
 if len(st.session_state.models) == 0:
     st.info("No trained models found. Train models in section 4.")
 else:
     selected = st.selectbox("Select model to evaluate", options=list(st.session_state.models.keys()))
     if st.button("Evaluate selected model"):
         model, scaler_model = st.session_state.models[selected]
-        metrics = evaluate_model(model, st.session_state.X_test, st.session_state.y_test, scaler=scaler_model, model_name=selected)
-        # Save result
+        metrics = evaluate_model(model, st.session_state.X_test, st.session_state.y_test, scaler=scaler_model)
         st.session_state.results[selected] = metrics
-        # Show classification report
+
+        # show report
         st.subheader(f"{selected} - Classification Report")
         rep = metrics['report']
         if rep:
             st.dataframe(pd.DataFrame(rep).transpose())
         else:
             st.write("Classification report unavailable.")
-        # Show confusion matrix
+
+        # confusion matrix
         st.subheader("Confusion Matrix")
         fig = plt.figure(figsize=(5,4))
-        plot_confusion_matrix(st.session_state.y_test, metrics['y_pred'], labels=np.unique(st.session_state.y))
+        labels_sorted = sorted(list(pd.Series(st.session_state.y_test).unique()))
+        plot_confusion_matrix(st.session_state.y_test, metrics['y_pred'], labels=labels_sorted, ax=fig.gca())
         st.pyplot(fig)
-        # ROC if available
-        if metrics['auc'] is not None:
+
+        # ROC
+        if metrics['auc'] is not None and not np.isnan(metrics['auc']):
             st.subheader(f"ROC Curve (AUC = {metrics['auc']:.3f})")
             fig2 = plt.figure(figsize=(5,4))
             plot_roc(st.session_state.y_test, metrics['y_prob'], ax=fig2.gca(), label=selected)
             st.pyplot(fig2)
-        st.success("Evaluation complete.")
+        else:
+            st.write("ROC AUC not available for this model.")
 
-# Section: Compare all evaluated models and choose best
-st.header("6) Compare evaluated models & pick the best")
+# 6) Compare & pick best
+st.header("6) Compare evaluated models & select best")
 if len(st.session_state.results) == 0:
     st.info("No evaluations yet. Evaluate models in section 5.")
 else:
-    # Build DataFrame of metrics
     comp = []
     for name, m in st.session_state.results.items():
         comp.append({
@@ -372,9 +374,9 @@ else:
             joblib.dump({"model": model, "scaler": scaler_model, "features": st.session_state.X.columns.tolist()}, f"best_model_{name.replace(' ','_')}.pkl")
             st.success(f"Saved best_model_{name.replace(' ','_')}.pkl")
 
-# Section: Prediction on new data / uploaded CSV
+# 7) Predict on new data
 st.header("7) Predict on new data")
-st.write("You can upload a CSV with the same feature columns or use manual single-record input.")
+st.write("Upload a CSV for batch prediction, or use the Single-record input for a quick test.")
 
 with st.expander("Upload CSV for batch prediction"):
     upload_pred = st.file_uploader("Upload CSV (for prediction)", type=["csv"], key="pred_csv")
@@ -383,7 +385,6 @@ with st.expander("Upload CSV for batch prediction"):
         st.write("Preview uploaded data:")
         st.dataframe(df_pred.head())
         if st.button("Run predictions on uploaded CSV"):
-            # choose a model
             if st.session_state.best_model is None:
                 st.warning("No best model selected. Choose or pick a best model first.")
             else:
@@ -392,7 +393,6 @@ with st.expander("Upload CSV for batch prediction"):
                 if model is None:
                     st.error("Model not found in session.")
                 else:
-                    # reformat df_pred columns: fill missing with training medians and reorder
                     feat_cols = st.session_state.X.columns.tolist()
                     df_temp = pd.DataFrame(columns=feat_cols, index=df_pred.index)
                     for c in feat_cols:
@@ -416,10 +416,10 @@ with st.expander("Single-record manual input"):
     if st.session_state.X is not None:
         default_inputs = get_default_feature_inputs(st.session_state.X)
         user_input = {}
-        # To keep UI compact, we'll show the first 10 features or all if <= 10
         feature_list = st.session_state.X.columns.tolist()
+        # show first 10 features to keep UI compact; can be extended
         show_features = feature_list if len(feature_list) <= 10 else feature_list[:10]
-        st.write(f"Showing {len(show_features)} features for manual input (you can extend code to show all).")
+        st.write(f"Showing {len(show_features)} features for manual input (first {len(show_features)} features).")
         for feat in show_features:
             mn = float(st.session_state.X[feat].min())
             mx = float(st.session_state.X[feat].max())
@@ -431,7 +431,6 @@ with st.expander("Single-record manual input"):
             else:
                 name = st.session_state.best_model
                 model, scaler_model = st.session_state.models[name]
-                # build full feature vector (fill other features with medians)
                 full = pd.DataFrame([st.session_state.X.median().to_dict()])
                 for k, v in user_input.items():
                     full[k] = v
@@ -443,11 +442,10 @@ with st.expander("Single-record manual input"):
                 prob = model.predict_proba(X_input)[0, 1] if hasattr(model, "predict_proba") else None
                 st.success(f"Prediction: {pred} (prob positive={prob:.3f})")
 
-# Final notes
 st.markdown("---")
 st.write("""
-**Notes & tips**
+**Notes**
 - Run steps in order: load dataset → select target/features → split → (optional) scale → train models → evaluate → compare/pick best → predict.
-- For custom dataset, ensure feature names match between training and prediction CSVs.
-- For real production use: perform cross-validation, hyper-parameter tuning, and robust validation on external datasets.
+- For custom dataset: ensure feature names align between training and prediction CSVs.
+- For production: add cross-validation, hyperparameter tuning, and interpretability (SHAP).
 """)
