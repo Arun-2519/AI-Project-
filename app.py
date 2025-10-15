@@ -1,15 +1,10 @@
 # app.py
 """
-Step-by-step ML pipeline (Streamlit)
-- Load built-in Breast Cancer dataset OR upload your CSV
-- Select target & features
-- Train/test split (manual trigger)
-- Optional scaling (StandardScaler)
-- Train models individually or all at once (Logistic Regression, Decision Tree, Random Forest)
-- Evaluate models: confusion matrix, classification report, ROC curve
-- Compare evaluated models, pick & save best model
-- Upload CSV for batch prediction or provide a single-record input
-- Improved class distribution display (labels, counts, percentages + charts)
+Enhanced Step-by-step ML pipeline — Streamlit
+- Adds feature descriptions (mean radius, mean texture, ...)
+- Improved Scaling UI: show min/max/mean/std, preview before/after scaling, scale-a-value widget
+- "Evaluate All Trained Models" button
+- All prior functionality preserved: upload CSV, select target/features, split, train, eval, compare, save, predict
 """
 
 import streamlit as st
@@ -30,7 +25,27 @@ from sklearn.metrics import (confusion_matrix, classification_report,
 import joblib
 
 sns.set_style("whitegrid")
-st.set_page_config(page_title="Step-by-step ML Pipeline", layout="wide")
+st.set_page_config(page_title="Step-by-step ML Pipeline (Enhanced)", layout="wide")
+
+# ---------------------------
+# Feature descriptions (brief)
+# ---------------------------
+FEATURE_DESCRIPTIONS = {
+    "mean radius": "Mean of distances from center to points on the perimeter",
+    "mean texture": "Standard deviation of gray-scale values (measure of contrast)",
+    "mean perimeter": "Mean perimeter of the nucleus",
+    "mean area": "Mean area of the nucleus",
+    "mean smoothness": "Mean local variation in radius lengths (smoothness)",
+    "mean compactness": "Mean (perimeter^2 / area - 1.0)",
+    "mean concavity": "Mean severity of concave portions of the contour",
+    "mean concave points": "Mean number of concave portions of the contour",
+    "mean symmetry": "Mean symmetry measure",
+    "mean fractal dimension": "Mean fractal dimension (coastline approximation)",
+    # many features: we include a short mapping for the common ones; others will show generic notes
+}
+
+def describe_feature(fname):
+    return FEATURE_DESCRIPTIONS.get(fname, "Feature from dataset (no short description available).")
 
 # ---------------------------
 # Helper functions
@@ -107,24 +122,13 @@ def evaluate_model(model, X_test, y_test, scaler=None):
 # ---------------------------
 # Session state initialization
 # ---------------------------
-if "df" not in st.session_state:
-    st.session_state.df = None
-if "X" not in st.session_state:
-    st.session_state.X = None
-if "y" not in st.session_state:
-    st.session_state.y = None
-if "scaler" not in st.session_state:
-    st.session_state.scaler = None
-if "models" not in st.session_state:
-    st.session_state.models = {}
-if "results" not in st.session_state:
-    st.session_state.results = {}
-if "best_model" not in st.session_state:
-    st.session_state.best_model = None
-if "train_done" not in st.session_state:
-    st.session_state.train_done = False
-if "split_done" not in st.session_state:
-    st.session_state.split_done = False
+for key, default in {
+    "df": None, "X": None, "y": None, "scaler": None,
+    "models": {}, "results": {}, "best_model": None,
+    "train_done": False, "split_done": False
+}.items():
+    if key not in st.session_state:
+        st.session_state[key] = default
 
 # ---------------------------
 # Sidebar controls
@@ -172,7 +176,7 @@ if st.sidebar.button("Reset session"):
 # ---------------------------
 # Main content
 # ---------------------------
-st.title("Step-by-step ML pipeline — Interactive")
+st.title("Step-by-step ML pipeline — Enhanced UI")
 
 # 1) Dataset preview & selection
 st.header("1) Dataset preview & select target/features")
@@ -192,6 +196,17 @@ if st.session_state.df is not None:
             st.session_state.split_done = False
             st.session_state.train_done = False
             st.success("Dataset configured: features & target set.")
+
+    # Feature description panel
+    with st.expander("Feature descriptions (click to expand)"):
+        st.write("Short descriptions for common features (from the Breast Cancer dataset).")
+        # if using sklearn built-in names, show descriptions; otherwise show selected features
+        feat_list_to_show = st.session_state.X.columns.tolist() if st.session_state.X is not None else all_cols
+        desc_rows = []
+        for f in feat_list_to_show:
+            desc_rows.append((f, describe_feature(f)))
+        desc_df = pd.DataFrame(desc_rows, columns=["Feature", "Short description"])
+        st.dataframe(desc_df)
 else:
     st.info("No dataset loaded. Use the sidebar to load built-in dataset or upload a CSV.")
 
@@ -218,16 +233,14 @@ else:
         except Exception as e:
             st.error(f"Split failed: {e}")
 
-# Display class distribution (improved)
+# Display improved class distribution (labels, counts, %)
 if st.session_state.split_done:
     st.subheader("Class distribution (train & test)")
     y_train = st.session_state.y_train
     y_test = st.session_state.y_test
-    # determine labels (sorted unique)
     labels = sorted(list(pd.Series(y_train).unique()))
     train_counts = pd.Series(y_train).value_counts().sort_index()
     test_counts = pd.Series(y_test).value_counts().sort_index()
-    # build dataframe
     dist_df = pd.DataFrame({
         "Class": labels,
         "Train Count": [int(train_counts.get(l, 0)) for l in labels],
@@ -245,20 +258,52 @@ if st.session_state.split_done:
     axes[1].set_title("Test class counts")
     st.pyplot(fig)
 
-# 3) Scaling
-st.header("3) Scaling (optional)")
+# 3) Scaling (enhanced)
+st.header("3) Scaling (Optional, enhanced preview)")
 if st.session_state.split_done:
     if use_scaler and st.button("Fit StandardScaler on training set"):
         scaler = StandardScaler().fit(st.session_state.X_train)
         st.session_state.scaler = scaler
         st.success("Scaler fitted and stored in session.")
     if st.session_state.scaler is not None:
-        st.write("Scaler mean (first 5):", np.round(st.session_state.scaler.mean_[:5], 4))
-        if st.button("Clear scaler"):
+        st.write("Scaler fitted. You can preview original vs scaled values below.")
+        # show summary stats for features (min,max,mean,std)
+        stats = st.session_state.X_train.describe().T[['min','max','mean','std']].round(4)
+        st.subheader("Feature statistics (train set)")
+        st.dataframe(stats)
+
+        # preview first 5 rows before and after scaling
+        preview_rows = min(5, st.session_state.X_train.shape[0])
+        orig_preview = st.session_state.X_train.head(preview_rows).reset_index(drop=True)
+        scaled_preview = pd.DataFrame(st.session_state.scaler.transform(orig_preview), columns=orig_preview.columns)
+        st.subheader("Preview: original (left) vs scaled (right)")
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.write("Original (first rows)")
+            st.dataframe(orig_preview)
+        with col_b:
+            st.write("Scaled (same rows)")
+            st.dataframe(scaled_preview)
+
+        # interactive: pick a feature and a raw value and see scaled value
+        st.subheader("Scale a value (see result)")
+        feature_for_demo = st.selectbox("Select feature to inspect scaling", options=st.session_state.X_train.columns.tolist())
+        raw_min = float(st.session_state.X_train[feature_for_demo].min())
+        raw_max = float(st.session_state.X_train[feature_for_demo].max())
+        raw_example = st.slider("Raw value to scale", min_value=raw_min, max_value=raw_max, value=float(st.session_state.X_train[feature_for_demo].median()))
+        # compute scaled
+        mean_f = st.session_state.scaler.mean_[st.session_state.X_train.columns.get_loc(feature_for_demo)]
+        scale_f = st.session_state.scaler.scale_[st.session_state.X_train.columns.get_loc(feature_for_demo)]
+        scaled_value = (raw_example - mean_f) / (scale_f + 1e-12)
+        st.write(f"Feature: **{feature_for_demo}**")
+        st.write(f"Raw value: {raw_example:.4f}  → Scaled value: **{scaled_value:.4f}** (mean={mean_f:.4f}, std={scale_f:.4f})")
+        if st.button("Clear Scaler"):
             st.session_state.scaler = None
             st.success("Scaler cleared.")
+    else:
+        st.info("Scaler not fitted yet. Toggle 'Use StandardScaler' in the sidebar and click 'Fit StandardScaler' to fit.")
 
-# 4) Train models (manual)
+# 4) Train models (manual plus Train All)
 st.header("4) Train models (manual or Train All)")
 if not st.session_state.split_done:
     st.warning("Please complete train/test split first.")
@@ -306,45 +351,51 @@ else:
             trained.append("Random Forest")
         st.success(f"Trained: {', '.join(trained)}")
 
-# 5) Evaluate single model
-st.header("5) Evaluate trained models (select & evaluate)")
+# 5) Evaluate models (single or Evaluate All)
+st.header("5) Evaluate trained models (single / evaluate all)")
 if len(st.session_state.models) == 0:
     st.info("No trained models found. Train models in section 4.")
 else:
     selected = st.selectbox("Select model to evaluate", options=list(st.session_state.models.keys()))
-    if st.button("Evaluate selected model"):
-        model, scaler_model = st.session_state.models[selected]
-        metrics = evaluate_model(model, st.session_state.X_test, st.session_state.y_test, scaler=scaler_model)
-        st.session_state.results[selected] = metrics
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if st.button("Evaluate selected model"):
+            model, scaler_model = st.session_state.models[selected]
+            metrics = evaluate_model(model, st.session_state.X_test, st.session_state.y_test, scaler=scaler_model)
+            st.session_state.results[selected] = metrics
+            st.success(f"Evaluated {selected}. Results saved.")
+    with col_b:
+        if st.button("Evaluate ALL trained models"):
+            for name, (model_obj, scaler_obj) in st.session_state.models.items():
+                metrics = evaluate_model(model_obj, st.session_state.X_test, st.session_state.y_test, scaler=scaler_obj)
+                st.session_state.results[name] = metrics
+            st.success("Evaluated all trained models and saved results.")
 
-        # show report
+    # If result exists for selected, show immediately
+    if selected in st.session_state.results:
+        metrics = st.session_state.results[selected]
         st.subheader(f"{selected} - Classification Report")
         rep = metrics['report']
         if rep:
             st.dataframe(pd.DataFrame(rep).transpose())
         else:
             st.write("Classification report unavailable.")
-
-        # confusion matrix
         st.subheader("Confusion Matrix")
         fig = plt.figure(figsize=(5,4))
         labels_sorted = sorted(list(pd.Series(st.session_state.y_test).unique()))
         plot_confusion_matrix(st.session_state.y_test, metrics['y_pred'], labels=labels_sorted, ax=fig.gca())
         st.pyplot(fig)
-
-        # ROC
         if metrics['auc'] is not None and not np.isnan(metrics['auc']):
             st.subheader(f"ROC Curve (AUC = {metrics['auc']:.3f})")
             fig2 = plt.figure(figsize=(5,4))
             plot_roc(st.session_state.y_test, metrics['y_prob'], ax=fig2.gca(), label=selected)
             st.pyplot(fig2)
-        else:
-            st.write("ROC AUC not available for this model.")
+        st.write(f"Accuracy: **{metrics['accuracy']:.4f}**   F1 (weighted): **{metrics['f1']:.4f}**   ROC-AUC: **{metrics['auc'] if metrics['auc'] is not None else 'N/A'}**")
 
 # 6) Compare & pick best
 st.header("6) Compare evaluated models & select best")
 if len(st.session_state.results) == 0:
-    st.info("No evaluations yet. Evaluate models in section 5.")
+    st.info("No evaluations yet. Evaluate single or all models in section 5.")
 else:
     comp = []
     for name, m in st.session_state.results.items():
@@ -417,7 +468,7 @@ with st.expander("Single-record manual input"):
         default_inputs = get_default_feature_inputs(st.session_state.X)
         user_input = {}
         feature_list = st.session_state.X.columns.tolist()
-        # show first 10 features to keep UI compact; can be extended
+        # show first 10 features to keep UI compact; change to show all if needed
         show_features = feature_list if len(feature_list) <= 10 else feature_list[:10]
         st.write(f"Showing {len(show_features)} features for manual input (first {len(show_features)} features).")
         for feat in show_features:
