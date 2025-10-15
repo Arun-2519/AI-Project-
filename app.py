@@ -1,10 +1,9 @@
 # app.py
 """
-Enhanced Step-by-step ML pipeline — Streamlit
+Enhanced Breast Cancer Detection Using ML 
 - Adds feature descriptions (mean radius, mean texture, ...)
 - Improved Scaling UI: show min/max/mean/std, preview before/after scaling, scale-a-value widget
 - "Evaluate All Trained Models" button
-- Automatic Best Model Recommendation (ROC-AUC / F1 / Accuracy)
 - All prior functionality preserved: upload CSV, select target/features, split, train, eval, compare, save, predict
 """
 
@@ -13,6 +12,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+from io import StringIO
 from sklearn.datasets import load_breast_cancer
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
@@ -41,6 +41,7 @@ FEATURE_DESCRIPTIONS = {
     "mean concave points": "Mean number of concave portions of the contour",
     "mean symmetry": "Mean symmetry measure",
     "mean fractal dimension": "Mean fractal dimension (coastline approximation)",
+    # many features: we include a short mapping for the common ones; others will show generic notes
 }
 
 def describe_feature(fname):
@@ -93,11 +94,13 @@ def get_default_feature_inputs(X):
     return X.median().to_dict()
 
 def evaluate_model(model, X_test, y_test, scaler=None):
+    # Prepare X_test
     if scaler is not None:
         X_eval = scaler.transform(X_test)
     else:
         X_eval = X_test.values if isinstance(X_test, pd.DataFrame) else X_test
     y_pred = model.predict(X_eval)
+    # probability / score
     if hasattr(model, "predict_proba"):
         y_prob = model.predict_proba(X_eval)[:, 1]
     else:
@@ -185,15 +188,23 @@ if st.session_state.df is not None:
     features = st.multiselect("Select features (columns to use as X)", options=[c for c in all_cols if c != target_col],
                               default=[c for c in all_cols if c != target_col])
     if st.button("Set dataset for modeling"):
-        st.session_state.X = st.session_state.df[features].copy()
-        st.session_state.y = st.session_state.df[target_col].copy()
-        st.session_state.split_done = False
-        st.session_state.train_done = False
-        st.success("Dataset configured: features & target set.")
+        if target_col not in st.session_state.df.columns:
+            st.error("Target not in dataframe")
+        else:
+            st.session_state.X = st.session_state.df[features].copy()
+            st.session_state.y = st.session_state.df[target_col].copy()
+            st.session_state.split_done = False
+            st.session_state.train_done = False
+            st.success("Dataset configured: features & target set.")
 
+    # Feature description panel
     with st.expander("Feature descriptions (click to expand)"):
+        st.write("Short descriptions for common features (from the Breast Cancer dataset).")
+        # if using sklearn built-in names, show descriptions; otherwise show selected features
         feat_list_to_show = st.session_state.X.columns.tolist() if st.session_state.X is not None else all_cols
-        desc_rows = [(f, describe_feature(f)) for f in feat_list_to_show]
+        desc_rows = []
+        for f in feat_list_to_show:
+            desc_rows.append((f, describe_feature(f)))
         desc_df = pd.DataFrame(desc_rows, columns=["Feature", "Short description"])
         st.dataframe(desc_df)
 else:
@@ -202,23 +213,27 @@ else:
 # 2) Train-test split
 st.header("2) Train / Test split")
 if st.session_state.X is None or st.session_state.y is None:
-    st.warning("Please select dataset & features first.")
+    st.warning("Please set dataset & target before splitting.")
 else:
     st.write("Dataset shape:", st.session_state.X.shape)
-    if st.button("Perform train/test split"):
-        strat = st.session_state.y if st.session_state.y.nunique() <= 20 else None
-        X_tr, X_te, y_tr, y_te = train_test_split(
-            st.session_state.X, st.session_state.y,
-            test_size=test_size, random_state=random_state, stratify=strat
-        )
-        st.session_state.X_train = X_tr.reset_index(drop=True)
-        st.session_state.X_test = X_te.reset_index(drop=True)
-        st.session_state.y_train = y_tr.reset_index(drop=True)
-        st.session_state.y_test = y_te.reset_index(drop=True)
-        st.session_state.split_done = True
-        st.success(f"Split done. Train shape: {X_tr.shape}, Test shape: {X_te.shape}")
+    if st.button("Perform train/test split (stratified if possible)"):
+        try:
+            strat = st.session_state.y if st.session_state.y.nunique() <= 20 else None
+            X_tr, X_te, y_tr, y_te = train_test_split(
+                st.session_state.X, st.session_state.y,
+                test_size=test_size, random_state=random_state, stratify=strat
+            )
+            st.session_state.X_train = X_tr.reset_index(drop=True)
+            st.session_state.X_test = X_te.reset_index(drop=True)
+            st.session_state.y_train = y_tr.reset_index(drop=True)
+            st.session_state.y_test = y_te.reset_index(drop=True)
+            st.session_state.split_done = True
+            st.session_state.train_done = False
+            st.success(f"Split done. Train shape: {X_tr.shape}, Test shape: {X_te.shape}")
+        except Exception as e:
+            st.error(f"Split failed: {e}")
 
-# Display class distribution
+# Display improved class distribution (labels, counts, %)
 if st.session_state.split_done:
     st.subheader("Class distribution (train & test)")
     y_train = st.session_state.y_train
@@ -228,102 +243,260 @@ if st.session_state.split_done:
     test_counts = pd.Series(y_test).value_counts().sort_index()
     dist_df = pd.DataFrame({
         "Class": labels,
-        "Train Count": [int(train_counts.get(l,0)) for l in labels],
-        "Test Count": [int(test_counts.get(l,0)) for l in labels]
+        "Train Count": [int(train_counts.get(l, 0)) for l in labels],
+        "Test Count": [int(test_counts.get(l, 0)) for l in labels]
     })
-    dist_df["Train %"] = (dist_df["Train Count"]/dist_df["Train Count"].sum()*100).round(2)
-    dist_df["Test %"] = (dist_df["Test Count"]/dist_df["Test Count"].sum()*100).round(2)
+    dist_df["Train %"] = (dist_df["Train Count"] / dist_df["Train Count"].sum() * 100).round(2)
+    dist_df["Test %"] = (dist_df["Test Count"] / dist_df["Test Count"].sum() * 100).round(2)
     st.dataframe(dist_df)
 
-    fig, axes = plt.subplots(1,2, figsize=(10,4))
+    # bar charts
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
     sns.barplot(x="Class", y="Train Count", data=dist_df, ax=axes[0])
     sns.barplot(x="Class", y="Test Count", data=dist_df, ax=axes[1])
     axes[0].set_title("Train class counts")
     axes[1].set_title("Test class counts")
     st.pyplot(fig)
 
-# 3) Scaling
-st.header("3) Scaling (Optional)")
+# 3) Scaling (enhanced)
+st.header("3) Scaling (Optional, enhanced preview)")
 if st.session_state.split_done:
     if use_scaler and st.button("Fit StandardScaler on training set"):
         scaler = StandardScaler().fit(st.session_state.X_train)
         st.session_state.scaler = scaler
-        st.success("Scaler fitted.")
-
+        st.success("Scaler fitted and stored in session.")
     if st.session_state.scaler is not None:
-        st.write("Scaler fitted. Preview original vs scaled:")
+        st.write("Scaler fitted. You can preview original vs scaled values below.")
+        # show summary stats for features (min,max,mean,std)
         stats = st.session_state.X_train.describe().T[['min','max','mean','std']].round(4)
-        st.subheader("Train feature statistics")
+        st.subheader("Feature statistics (train set)")
         st.dataframe(stats)
-        preview_scaled = pd.DataFrame(st.session_state.scaler.transform(st.session_state.X_train),
-                                      columns=st.session_state.X_train.columns)
-        st.subheader("First 5 rows scaled")
-        st.dataframe(preview_scaled.head())
-        # scale-a-value widget
-        feat_to_scale = st.selectbox("Select a feature to scale a value", st.session_state.X_train.columns)
-        val_to_scale = st.number_input(f"Enter value of {feat_to_scale} to scale", value=float(st.session_state.X_train[feat_to_scale].median()))
-        scaled_val = st.session_state.scaler.transform(np.array([[val_to_scale if f==feat_to_scale else 0
-                                                                  for f in st.session_state.X_train.columns]]))[0][
-            st.session_state.X_train.columns.get_loc(feat_to_scale)]
-        st.write(f"Scaled value: {scaled_val:.4f}")
 
-# 4) Train models
-st.header("4) Train Models")
-if st.session_state.split_done:
-    if st.button("Train selected models"):
-        models = {}
-        results = {}
-        for model_name, selected in [("LogisticRegression", train_lr),
-                                     ("DecisionTree", train_dt),
-                                     ("RandomForest", train_rf)]:
-            if selected:
-                if model_name=="LogisticRegression":
-                    model = LogisticRegression(max_iter=500, random_state=random_state)
-                elif model_name=="DecisionTree":
-                    model = DecisionTreeClassifier(random_state=random_state)
-                elif model_name=="RandomForest":
-                    model = RandomForestClassifier(random_state=random_state)
-                # fit
-                X_fit = st.session_state.scaler.transform(st.session_state.X_train) if st.session_state.scaler is not None else st.session_state.X_train
-                model.fit(X_fit, st.session_state.y_train)
-                models[model_name] = model
-                res = evaluate_model(model, st.session_state.X_test, st.session_state.y_test, scaler=st.session_state.scaler)
-                results[model_name] = res
-        st.session_state.models = models
-        st.session_state.results = results
-        st.session_state.train_done = True
-        st.success(f"Trained {len(models)} models.")
+        # preview first 5 rows before and after scaling
+        preview_rows = min(5, st.session_state.X_train.shape[0])
+        orig_preview = st.session_state.X_train.head(preview_rows).reset_index(drop=True)
+        scaled_preview = pd.DataFrame(st.session_state.scaler.transform(orig_preview), columns=orig_preview.columns)
+        st.subheader("Preview: original (left) vs scaled (right)")
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.write("Original (first rows)")
+            st.dataframe(orig_preview)
+        with col_b:
+            st.write("Scaled (same rows)")
+            st.dataframe(scaled_preview)
 
-# 5) Evaluate & pick best
-st.header("5) Evaluate & pick best model")
-if st.session_state.train_done:
-    best_score = -1
-    best_model_name = None
-    for name, res in st.session_state.results.items():
-        metric_value = res["auc"] if metric_for_best=="ROC-AUC" else (res["f1"] if metric_for_best=="F1" else res["accuracy"])
-        st.subheader(name)
-        st.write(f"Accuracy: {res['accuracy']:.4f}, F1: {res['f1']:.4f}, AUC: {res['auc'] if res['auc'] is not None else 'NA'}")
-        fig_cm = plot_confusion_matrix(st.session_state.y_test, res['y_pred'], labels=sorted(st.session_state.y_test.unique()))
-        st.pyplot(fig_cm)
-        fig_roc, _ = plot_roc(st.session_state.y_test, res['y_prob'], label=name)
-        st.pyplot(fig_roc)
-        if metric_value is not None and metric_value>best_score:
-            best_score = metric_value
-            best_model_name = name
-    st.session_state.best_model = best_model_name
-    st.success(f"Best model selected: {best_model_name} based on {metric_for_best}")
+        # interactive: pick a feature and a raw value and see scaled value
+        st.subheader("Scale a value (see result)")
+        feature_for_demo = st.selectbox("Select feature to inspect scaling", options=st.session_state.X_train.columns.tolist())
+        raw_min = float(st.session_state.X_train[feature_for_demo].min())
+        raw_max = float(st.session_state.X_train[feature_for_demo].max())
+        raw_example = st.slider("Raw value to scale", min_value=raw_min, max_value=raw_max, value=float(st.session_state.X_train[feature_for_demo].median()))
+        # compute scaled
+        mean_f = st.session_state.scaler.mean_[st.session_state.X_train.columns.get_loc(feature_for_demo)]
+        scale_f = st.session_state.scaler.scale_[st.session_state.X_train.columns.get_loc(feature_for_demo)]
+        scaled_value = (raw_example - mean_f) / (scale_f + 1e-12)
+        st.write(f"Feature: **{feature_for_demo}**")
+        st.write(f"Raw value: {raw_example:.4f}  → Scaled value: **{scaled_value:.4f}** (mean={mean_f:.4f}, std={scale_f:.4f})")
+        if st.button("Clear Scaler"):
+            st.session_state.scaler = None
+            st.success("Scaler cleared.")
+    else:
+        st.info("Scaler not fitted yet. Toggle 'Use StandardScaler' in the sidebar and click 'Fit StandardScaler' to fit.")
 
-# 6) Predict new data
-st.header("6) Predict new data")
-if st.session_state.train_done:
-    st.write("Enter values for prediction (median defaults shown)")
-    default_vals = get_default_feature_inputs(st.session_state.X)
-    new_data = {}
-    for f in st.session_state.X.columns:
-        new_data[f] = st.number_input(f, value=float(default_vals[f]))
-    if st.button("Predict"):
-        df_new = pd.DataFrame([new_data])
-        model_to_use = st.session_state.models[st.session_state.best_model]
-        X_new = st.session_state.scaler.transform(df_new) if st.session_state.scaler is not None else df_new
-        pred = model_to_use.predict(X_new)[0]
-        st.success(f"Predicted class: {pred}")
+# 4) Train models (manual plus Train All)
+st.header("4) Train models (manual or Train All)")
+if not st.session_state.split_done:
+    st.warning("Please complete train/test split first.")
+else:
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        if train_lr and st.button("Train Logistic Regression"):
+            scaler_local = st.session_state.scaler
+            Xtr = scaler_local.transform(st.session_state.X_train) if scaler_local is not None else st.session_state.X_train.values
+            lr = LogisticRegression(max_iter=1000, random_state=random_state)
+            lr.fit(Xtr, st.session_state.y_train)
+            st.session_state.models['Logistic Regression'] = (lr, scaler_local)
+            st.success("Trained Logistic Regression.")
+    with col2:
+        if train_dt and st.button("Train Decision Tree"):
+            dt = DecisionTreeClassifier(random_state=random_state)
+            dt.fit(st.session_state.X_train.values, st.session_state.y_train)
+            st.session_state.models['Decision Tree'] = (dt, None)
+            st.success("Trained Decision Tree.")
+    with col3:
+        if train_rf and st.button("Train Random Forest"):
+            rf = RandomForestClassifier(n_estimators=200, random_state=random_state)
+            rf.fit(st.session_state.X_train.values, st.session_state.y_train)
+            st.session_state.models['Random Forest'] = (rf, None)
+            st.success("Trained Random Forest.")
+
+    if st.button("Train All Selected Models"):
+        trained = []
+        if train_lr:
+            scaler_local = st.session_state.scaler
+            Xtr = scaler_local.transform(st.session_state.X_train) if scaler_local is not None else st.session_state.X_train.values
+            lr = LogisticRegression(max_iter=1000, random_state=random_state)
+            lr.fit(Xtr, st.session_state.y_train)
+            st.session_state.models['Logistic Regression'] = (lr, scaler_local)
+            trained.append("Logistic Regression")
+        if train_dt:
+            dt = DecisionTreeClassifier(random_state=random_state)
+            dt.fit(st.session_state.X_train.values, st.session_state.y_train)
+            st.session_state.models['Decision Tree'] = (dt, None)
+            trained.append("Decision Tree")
+        if train_rf:
+            rf = RandomForestClassifier(n_estimators=200, random_state=random_state)
+            rf.fit(st.session_state.X_train.values, st.session_state.y_train)
+            st.session_state.models['Random Forest'] = (rf, None)
+            trained.append("Random Forest")
+        st.success(f"Trained: {', '.join(trained)}")
+
+# 5) Evaluate models (single or Evaluate All)
+st.header("5) Evaluate trained models (single / evaluate all)")
+if len(st.session_state.models) == 0:
+    st.info("No trained models found. Train models in section 4.")
+else:
+    selected = st.selectbox("Select model to evaluate", options=list(st.session_state.models.keys()))
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if st.button("Evaluate selected model"):
+            model, scaler_model = st.session_state.models[selected]
+            metrics = evaluate_model(model, st.session_state.X_test, st.session_state.y_test, scaler=scaler_model)
+            st.session_state.results[selected] = metrics
+            st.success(f"Evaluated {selected}. Results saved.")
+    with col_b:
+        if st.button("Evaluate ALL trained models"):
+            for name, (model_obj, scaler_obj) in st.session_state.models.items():
+                metrics = evaluate_model(model_obj, st.session_state.X_test, st.session_state.y_test, scaler=scaler_obj)
+                st.session_state.results[name] = metrics
+            st.success("Evaluated all trained models and saved results.")
+
+    # If result exists for selected, show immediately
+    if selected in st.session_state.results:
+        metrics = st.session_state.results[selected]
+        st.subheader(f"{selected} - Classification Report")
+        rep = metrics['report']
+        if rep:
+            st.dataframe(pd.DataFrame(rep).transpose())
+        else:
+            st.write("Classification report unavailable.")
+        st.subheader("Confusion Matrix")
+        fig = plt.figure(figsize=(5,4))
+        labels_sorted = sorted(list(pd.Series(st.session_state.y_test).unique()))
+        plot_confusion_matrix(st.session_state.y_test, metrics['y_pred'], labels=labels_sorted, ax=fig.gca())
+        st.pyplot(fig)
+        if metrics['auc'] is not None and not np.isnan(metrics['auc']):
+            st.subheader(f"ROC Curve (AUC = {metrics['auc']:.3f})")
+            fig2 = plt.figure(figsize=(5,4))
+            plot_roc(st.session_state.y_test, metrics['y_prob'], ax=fig2.gca(), label=selected)
+            st.pyplot(fig2)
+        st.write(f"Accuracy: **{metrics['accuracy']:.4f}**   F1 (weighted): **{metrics['f1']:.4f}**   ROC-AUC: **{metrics['auc'] if metrics['auc'] is not None else 'N/A'}**")
+
+# 6) Compare & pick best
+st.header("6) Compare evaluated models & select best")
+if len(st.session_state.results) == 0:
+    st.info("No evaluations yet. Evaluate single or all models in section 5.")
+else:
+    comp = []
+    for name, m in st.session_state.results.items():
+        comp.append({
+            "Model": name,
+            "Accuracy": m['accuracy'],
+            "F1": m['f1'],
+            "ROC-AUC": m['auc'] if m['auc'] is not None else np.nan
+        })
+    comp_df = pd.DataFrame(comp).set_index("Model")
+    st.dataframe(comp_df)
+    if st.button("Automatically pick best model"):
+        sort_key = metric_for_best
+        if sort_key == "ROC-AUC":
+            best = comp_df['ROC-AUC'].idxmax()
+        elif sort_key == "F1":
+            best = comp_df['F1'].idxmax()
+        else:
+            best = comp_df['Accuracy'].idxmax()
+        st.session_state.best_model = best
+        st.success(f"Best model by {sort_key}: {best}")
+    if st.session_state.best_model is not None:
+        st.info(f"Currently selected best model: {st.session_state.best_model}")
+        if st.button("Save best model to disk (joblib)"):
+            name = st.session_state.best_model
+            model, scaler_model = st.session_state.models[name]
+            joblib.dump({"model": model, "scaler": scaler_model, "features": st.session_state.X.columns.tolist()}, f"best_model_{name.replace(' ','_')}.pkl")
+            st.success(f"Saved best_model_{name.replace(' ','_')}.pkl")
+
+# 7) Predict on new data
+st.header("7) Predict on new data")
+st.write("Upload a CSV for batch prediction, or use the Single-record input for a quick test.")
+
+with st.expander("Upload CSV for batch prediction"):
+    upload_pred = st.file_uploader("Upload CSV (for prediction)", type=["csv"], key="pred_csv")
+    if upload_pred is not None:
+        df_pred = pd.read_csv(upload_pred)
+        st.write("Preview uploaded data:")
+        st.dataframe(df_pred.head())
+        if st.button("Run predictions on uploaded CSV"):
+            if st.session_state.best_model is None:
+                st.warning("No best model selected. Choose or pick a best model first.")
+            else:
+                name = st.session_state.best_model
+                model, scaler_model = st.session_state.models.get(name, (None, None))
+                if model is None:
+                    st.error("Model not found in session.")
+                else:
+                    feat_cols = st.session_state.X.columns.tolist()
+                    df_temp = pd.DataFrame(columns=feat_cols, index=df_pred.index)
+                    for c in feat_cols:
+                        if c in df_pred.columns:
+                            df_temp[c] = df_pred[c]
+                        else:
+                            df_temp[c] = st.session_state.X[c].median()
+                    X_input = df_temp.values
+                    if scaler_model is not None:
+                        X_input = scaler_model.transform(X_input)
+                    preds = model.predict(X_input)
+                    probs = model.predict_proba(X_input)[:, 1] if hasattr(model, "predict_proba") else None
+                    out = df_pred.copy()
+                    out["predicted_label"] = preds
+                    out["pred_prob"] = probs
+                    st.dataframe(out.head())
+                    csv_bytes = out.to_csv(index=False).encode("utf-8")
+                    st.download_button("Download predictions CSV", csv_bytes, "predictions.csv")
+
+with st.expander("Single-record manual input"):
+    if st.session_state.X is not None:
+        default_inputs = get_default_feature_inputs(st.session_state.X)
+        user_input = {}
+        feature_list = st.session_state.X.columns.tolist()
+        # show first 10 features to keep UI compact; change to show all if needed
+        show_features = feature_list if len(feature_list) <= 10 else feature_list[:10]
+        st.write(f"Showing {len(show_features)} features for manual input (first {len(show_features)} features).")
+        for feat in show_features:
+            mn = float(st.session_state.X[feat].min())
+            mx = float(st.session_state.X[feat].max())
+            val = st.number_input(feat, value=float(default_inputs[feat]), min_value=mn, max_value=mx, key=f"inp_{feat}")
+            user_input[feat] = val
+        if st.button("Predict single record"):
+            if st.session_state.best_model is None:
+                st.warning("No best model selected - cannot predict.")
+            else:
+                name = st.session_state.best_model
+                model, scaler_model = st.session_state.models[name]
+                full = pd.DataFrame([st.session_state.X.median().to_dict()])
+                for k, v in user_input.items():
+                    full[k] = v
+                full = full[st.session_state.X.columns]
+                X_input = full.values
+                if scaler_model is not None:
+                    X_input = scaler_model.transform(X_input)
+                pred = model.predict(X_input)[0]
+                prob = model.predict_proba(X_input)[0, 1] if hasattr(model, "predict_proba") else None
+                st.success(f"Prediction: {pred} (prob positive={prob:.3f})")
+
+st.markdown("---")
+st.write("""
+**Notes**
+- Run steps in order: load dataset → select target/features → split → (optional) scale → train models → evaluate → compare/pick best → predict.
+- For custom dataset: ensure feature names align between training and prediction CSVs.
+- For production: add cross-validation, hyperparameter tuning, and interpretability (SHAP).
+""")
